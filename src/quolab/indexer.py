@@ -63,11 +63,63 @@ def fetch_repo(settings: Settings, project_id: str, ref: str) -> Path:
         return cache
 
     if settings.fetch == "rest":
-        raise NotImplementedError(
-            "REST fetch is planned for read-only targets; use QUOLAB_FETCH=git for now"
-        )
+        _fetch_via_rest(settings, project_id, ref, cache)
+        return cache
 
     raise ValueError(f"Unknown fetch method: {settings.fetch!r}")
+
+
+def _fetch_via_rest(settings: Settings, project_id: str, ref: str, cache: Path) -> None:
+    """Download matching source files via the GitLab REST API (read-only, no clone).
+
+    Uses the free-tier repository tree + raw-file endpoints, so it works on any plan
+    and on repos we only have read access to.
+    """
+    import httpx
+    from urllib.parse import quote
+
+    if project_id.startswith(("http://", "https://")):
+        raise ValueError("QUOLAB_FETCH=rest expects a 'group/repo' path, not a URL")
+
+    base = settings.gitlab_url.rstrip("/")
+    pid = quote(project_id, safe="")
+    headers = {"PRIVATE-TOKEN": settings.gitlab_token} if settings.gitlab_token else {}
+    params_ref = {} if ref in ("", "HEAD", "default") else {"ref": ref}
+    allowed = _allowed_suffixes(settings.include_glob_list)
+
+    with httpx.Client(timeout=30, headers=headers) as client:
+        # paginate the recursive tree
+        blobs: list[str] = []
+        page = 1
+        while True:
+            resp = client.get(
+                f"{base}/api/v4/projects/{pid}/repository/tree",
+                params={"recursive": "true", "per_page": 100, "page": page, **params_ref},
+            )
+            resp.raise_for_status()
+            entries = resp.json()
+            if not entries:
+                break
+            blobs += [
+                e["path"] for e in entries
+                if e.get("type") == "blob" and (not allowed or Path(e["path"]).suffix in allowed)
+            ]
+            if resp.headers.get("x-next-page"):
+                page = int(resp.headers["x-next-page"])
+            else:
+                break
+
+        for path in blobs:
+            enc = quote(path, safe="")
+            r = client.get(
+                f"{base}/api/v4/projects/{pid}/repository/files/{enc}/raw", params=params_ref
+            )
+            if r.status_code != 200:
+                continue
+            dest = cache / path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(r.content)
+    log.info("rest_fetch_complete", project_id=project_id, ref=ref, files=len(blobs))
 
 
 def _clone_url(settings: Settings, project_id: str) -> str:
@@ -183,6 +235,17 @@ def _chunk_by_lines(project_id, ref, path, lines, window) -> list[Chunk]:
             )
         )
     return chunks
+
+
+def resolve_commit(root: Path) -> str:
+    """Return the HEAD commit SHA of a cloned repo, or '' if not a git checkout."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else ""
+    except OSError:
+        return ""
 
 
 def cleanup_repo(settings: Settings, project_id: str, ref: str) -> None:

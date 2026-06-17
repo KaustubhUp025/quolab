@@ -35,6 +35,7 @@ class SearchRequest(BaseModel):
     query: str
     ref: str = "HEAD"
     max_results: int = Field(default=5, ge=1, le=50)
+    mode: str = Field(default="auto", description="auto | semantic | lexical | hybrid")
 
 
 class Hit(BaseModel):
@@ -68,7 +69,9 @@ def healthz() -> dict:
 @app.post("/search", response_model=SearchResponse)
 def search(req: SearchRequest) -> SearchResponse:
     try:
-        results = get_engine().search(req.project_id, req.query, req.ref, req.max_results)
+        results = get_engine().search(
+            req.project_id, req.query, req.ref, req.max_results, req.mode
+        )
     except Exception as exc:
         log.error("search_failed", error=str(exc))
         raise HTTPException(status_code=502, detail=f"search failed: {exc}") from exc
@@ -83,6 +86,11 @@ def search(req: SearchRequest) -> SearchResponse:
         project_id=req.project_id, ref=req.ref, query=req.query,
         hits=hits, formatted=format_results(req.query, results),
     )
+
+
+@app.get("/status")
+def status(project_id: str, ref: str = "HEAD") -> dict:
+    return get_engine().status(project_id, ref)
 
 
 @app.post("/index")

@@ -1,5 +1,3 @@
-import pathlib
-
 from fastapi.testclient import TestClient
 
 from quolab.app import app, get_engine

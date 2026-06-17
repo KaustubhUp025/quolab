@@ -16,7 +16,7 @@ def _seed_repo(tmp_path):
 
 
 def test_index_and_search_end_to_end(settings, fake_embedder, monkeypatch):
-    repo = _seed_repo(settings_tmp := __import__("pathlib").Path(settings.repo_cache).parent)
+    repo = _seed_repo(__import__("pathlib").Path(settings.repo_cache).parent)
     # Point fetch_repo at the seeded local dir instead of cloning.
     monkeypatch.setattr("quolab.engine.fetch_repo", lambda s, p, r: repo)
 
@@ -31,6 +31,32 @@ def test_index_and_search_end_to_end(settings, fake_embedder, monkeypatch):
     assert results
     paths = [r.chunk.path for r in results]
     assert any("saga.py" in p for p in paths)
+
+
+def test_hybrid_and_lexical_modes(settings, fake_embedder, monkeypatch):
+    repo = _seed_repo(__import__("pathlib").Path(settings.repo_cache).parent)
+    monkeypatch.setattr("quolab.engine.fetch_repo", lambda s, p, r: repo)
+    engine = SearchEngine(
+        settings=settings, embedder=fake_embedder, store=SqliteVecStore(settings.sqlite_path)
+    )
+    engine.index("proj", "HEAD")
+
+    # lexical: exact identifier 'acquire' lands the lock file
+    lex = engine.search("proj", "acquire", "HEAD", mode="lexical")
+    assert any("lock.py" in r.chunk.path for r in lex)
+
+    # hybrid: fuses both arms, returns results
+    hyb = engine.search("proj", "compensate", "HEAD", mode="hybrid")
+    assert hyb
+
+
+def test_invalid_mode_raises(settings, fake_embedder):
+    import pytest
+    engine = SearchEngine(
+        settings=settings, embedder=fake_embedder, store=SqliteVecStore(settings.sqlite_path)
+    )
+    with pytest.raises(ValueError):  # validated before any indexing
+        engine.search("proj", "x", "HEAD", mode="bogus")
 
 
 def test_search_lazily_indexes(settings, fake_embedder, monkeypatch):

@@ -24,6 +24,9 @@ class Settings(BaseSettings):
         description="Embedding model id (Gemini model, or sentence-transformers id when embedder=local)",
     )
     embed_dim: int = Field(default=768, description="Embedding dimensionality")
+    embed_concurrency: int = Field(
+        default=4, ge=1, description="Parallel embedding batches during indexing"
+    )
 
     # --- Vector store ---
     store: str = Field(default="sqlite", description="Vector store backend: 'sqlite' or 'pgvector'")

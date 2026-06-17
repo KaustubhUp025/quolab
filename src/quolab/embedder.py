@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Protocol
 
 import structlog
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from quolab.config import Settings
 
@@ -21,6 +22,13 @@ log = structlog.get_logger(__name__)
 # Gemini distinguishes document vs query embeddings via task_type.
 _TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
 _TASK_QUERY = "RETRIEVAL_QUERY"
+
+# Retry transient embedding-API failures (rate limit / 5xx / network) with backoff.
+_embed_retry = retry(
+    reraise=True,
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+)
 
 
 class Embedder(Protocol):
@@ -50,6 +58,7 @@ class GeminiEmbedder:
         self.model = model
         self.dim = dim
 
+    @_embed_retry
     def _embed(self, texts: list[str], task_type: str) -> list[list[float]]:
         from google.genai import types
 
