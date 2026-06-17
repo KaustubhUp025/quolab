@@ -2,6 +2,14 @@
   <img src="src/quolab/static/logo.svg" alt="quolab" height="56">
 </p>
 
+<p align="center">
+  <a href="https://github.com/KaustubhUp025/quolab/actions/workflows/ci.yml"><img src="https://github.com/KaustubhUp025/quolab/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/python-3.10%E2%80%933.12-blue" alt="python">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="license">
+  <img src="https://img.shields.io/badge/search-hybrid%20(BM25%2Bvector%2BRRF)-purple" alt="hybrid search">
+  <img src="https://img.shields.io/badge/MCP-FastMCP-purple" alt="mcp">
+</p>
+
 # quolab
 
 > The logo reuses [Quorum](../quorum)'s consensus ring as the **lens of a magnifying
@@ -47,20 +55,47 @@ curl -X POST localhost:8080/search -d '{"project_id":"https://gitlab.com/group/r
 ## Architecture
 
 ```
-repo (git clone / GitLab REST, free)
+repo (git clone / GitLab REST / local)
       │
       ▼
- tree-sitter chunking  ──►  Gemini embeddings  ──►  vector store (sqlite-vec | pgvector)
-                                                            │
-                          POST /search  ◄────────  cosine top-k
-                          MCP semantic_code_search tool (optional)
+ tree-sitter chunking ─► embeddings (gemini | local | hash) ─► store (sqlite+FTS5 | pgvector)
+                                                                   │
+                            ┌──────────────── hybrid retrieval ────┘
+                            │   lexical (BM25)  ⊕  vector  →  Reciprocal Rank Fusion
+                            ▼
+              REST  /search    ·    MCP  semantic_code_search    ·    CLI  quolab search
 ```
 
-- **Embeddings:** Gemini embedding API by default (free, no GPU). Pluggable — a local
-  OSS model (Qwen3-Embedding / nomic-embed-code) can be swapped via `QUOLAB_EMBEDDER=local`.
-- **Store:** `sqlite-vec` for zero-infra local use; `pgvector` for production.
-- **Output:** `/search` returns results in the same text shape Quorum's REST search
-  produces, so integration is a drop-in.
+### Search modes (`mode=`)
+- **`auto`** (default) — picks per query: code-shaped queries → `hybrid`, natural language → `semantic`.
+- **`hybrid`** — BM25 ⊕ vector fused with RRF (best recall for code; exact identifiers + intent).
+- **`semantic`** — vector only. **`lexical`** — BM25/FTS5 only.
+
+### Three ways to run it
+- **CLI:** `quolab search <repo> "where is the lock acquired" --mode auto`
+- **REST:** `POST /search` (returns Quorum's REST-search text shape — drop-in)
+- **MCP:** `quolab mcp` → FastMCP streamable-HTTP `semantic_code_search` tool for agents
+
+### Embeddings & store
+- **Embeddings:** `gemini` by default (free, no GPU; retry/backoff built in); `local`
+  (Qwen3-Embedding / nomic-embed-code) and `hash` (deterministic, offline for CI/dev).
+- **Store:** SQLite (numpy cosine + FTS5) for zero-infra local; `pgvector` for production.
+- **Indexing:** incremental by commit SHA — only changed files are re-embedded.
+
+## Use it with Quorum (no GitLab Ultimate)
+
+Quorum's only Ultimate dependency is semantic search. Point it at quolab:
+
+```bash
+quolab serve --port 8080                 # or deploy to Cloud Run
+# in Quorum's environment:
+export QUORUM_MCP_MODE=semantic
+export QUORUM_SEARCH_URL=http://localhost:8080
+quorum review <merge-request-url>        # uses quolab; falls back to REST if it's down
+```
+
+Also ships a **GitHub Action** (`action.yml`) and a **GitLab CI template** (`ci/`) for
+one-step "index → search → merge-gate" in any pipeline.
 
 ## License
 

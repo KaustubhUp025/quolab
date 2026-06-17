@@ -45,6 +45,11 @@ def fetch_repo(settings: Settings, project_id: str, ref: str) -> Path:
 
     ``project_id`` may be a full clone URL or a ``group/repo`` path.
     """
+    # Local-path passthrough: index a directory already on disk (CI/dogfood/dev).
+    local = Path(project_id)
+    if local.is_dir():
+        return local
+
     cache = Path(settings.repo_cache) / _repo_key(project_id, ref)
     if cache.exists():
         return cache
@@ -143,11 +148,18 @@ def _allowed_suffixes(globs: list[str]) -> set[str]:
     return suffixes
 
 
+# Directories never worth indexing (vendored / build / cache / VCS).
+_EXCLUDED_DIRS = frozenset({
+    ".git", ".venv", "venv", "node_modules", "__pycache__", "build", "dist",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".eggs", "site-packages",
+})
+
+
 def iter_source_files(root: Path, settings: Settings):
     """Yield (relative_path, text) for files matching the include globs."""
     allowed = _allowed_suffixes(settings.include_glob_list)
     for p in root.rglob("*"):
-        if not p.is_file() or ".git" in p.parts:
+        if not p.is_file() or _EXCLUDED_DIRS.intersection(p.parts):
             continue
         if allowed and p.suffix not in allowed:
             continue

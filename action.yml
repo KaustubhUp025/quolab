@@ -1,0 +1,38 @@
+name: "quolab semantic code search"
+description: "Index a repo and run quolab semantic/hybrid search + the SARIF merge-gate policy — an OSS slice of GitLab Ultimate."
+branding:
+  icon: search
+  color: purple
+
+inputs:
+  query:
+    description: "Search query (if set, prints results and exits)"
+    required: false
+    default: ""
+  mode:
+    description: "auto | semantic | lexical | hybrid"
+    required: false
+    default: "auto"
+  gemini-api-key:
+    description: "Gemini API key for embeddings (omit to use the offline 'hash' embedder)"
+    required: false
+    default: ""
+  target:
+    description: "Repo directory to index (defaults to the checked-out workspace)"
+    required: false
+    default: "."
+
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      run: pip install "quolab[treesitter] @ git+https://github.com/${{ github.repository_owner }}/quolab"
+    - shell: bash
+      env:
+        QUOLAB_GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+        QUOLAB_EMBEDDER: ${{ inputs.gemini-api-key != '' && 'gemini' || 'hash' }}
+      run: |
+        quolab index "${{ inputs.target }}"
+        if [ -n "${{ inputs.query }}" ]; then
+          quolab search "${{ inputs.target }}" "${{ inputs.query }}" --mode "${{ inputs.mode }}"
+        fi

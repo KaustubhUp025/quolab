@@ -100,6 +100,33 @@ class LocalEmbedder:
         return self._model.encode([text], normalize_embeddings=True)[0].tolist()
 
 
+class HashEmbedder:
+    """Deterministic, dependency-free embedder (no network, no model download).
+
+    Hashes text to a stable pseudo-random unit vector. Semantic quality is nil — it is
+    for **offline/CI** use, local smoke tests, and the dogfood benchmark where only the
+    pipeline and lexical/RRF paths need to run without a Gemini key.
+    """
+
+    def __init__(self, dim: int = 256) -> None:
+        self.dim = dim
+
+    def _vec(self, text: str) -> list[float]:
+        import hashlib
+
+        import numpy as np
+
+        seed = int(hashlib.sha1(text.encode("utf-8")).hexdigest()[:8], 16)
+        v = np.random.default_rng(seed).standard_normal(self.dim)
+        return (v / (np.linalg.norm(v) + 1e-12)).tolist()
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._vec(t) for t in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._vec(text)
+
+
 def make_embedder(settings: Settings) -> Embedder:
     """Build the configured embedder."""
     if settings.embedder == "gemini":
@@ -108,4 +135,9 @@ def make_embedder(settings: Settings) -> Embedder:
     if settings.embedder == "local":
         log.info("embedder_selected", backend="local", model=settings.embed_model)
         return LocalEmbedder(settings.embed_model, settings.embed_dim)
-    raise ValueError(f"Unknown embedder: {settings.embedder!r} (expected 'gemini' or 'local')")
+    if settings.embedder == "hash":
+        log.info("embedder_selected", backend="hash")
+        return HashEmbedder(settings.embed_dim)
+    raise ValueError(
+        f"Unknown embedder: {settings.embedder!r} (expected 'gemini', 'local' or 'hash')"
+    )

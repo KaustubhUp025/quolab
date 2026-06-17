@@ -1,0 +1,8 @@
+[
+  {"query": "reciprocal rank fusion", "expect": "retrieval.py", "mode": "lexical"},
+  {"query": "GeminiEmbedder embed_content", "expect": "embedder.py", "mode": "lexical"},
+  {"query": "lexical_search bm25", "expect": "store.py", "mode": "lexical"},
+  {"query": "fetch_repo git clone", "expect": "indexer.py", "mode": "lexical"},
+  {"query": "GateDecision merge policy", "expect": "policy.py", "mode": "lexical"},
+  {"query": "incremental index commit sha", "expect": "engine.py", "mode": "lexical"}
+]
