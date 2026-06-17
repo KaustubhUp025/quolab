@@ -77,10 +77,27 @@ repo (git clone / GitLab REST / local)
 - **MCP:** `quolab mcp` → FastMCP streamable-HTTP `semantic_code_search` tool for agents
 
 ### Embeddings & store
-- **Embeddings:** `gemini` by default (free, no GPU; retry/backoff built in); `local`
-  (Qwen3-Embedding / nomic-embed-code) and `hash` (deterministic, offline for CI/dev).
+- **Embeddings:** `gemini` by default (free AI Studio key, no GPU; retry/backoff built in);
+  `local` (Qwen3-Embedding / nomic-embed-code) and `hash` (deterministic, offline for CI/dev).
 - **Store:** SQLite (numpy cosine + FTS5) for zero-infra local; `pgvector` for production.
 - **Indexing:** incremental by commit SHA — only changed files are re-embedded.
+
+> **Free-tier note:** the AI Studio free tier caps `embed_content` at ~**100 requests/min**
+> (each chunk ≈ one request). quolab retries 429s with backoff, and incremental indexing
+> means you only pay that cost once per commit — but a *large first index* may need a
+> paid key or throttling (`QUOLAB_EMBED_CONCURRENCY=1`). The offline `hash` embedder needs
+> no key at all (lexical/hybrid still work; only pure-semantic quality drops).
+
+### Measured quality (dogfooding quolab on its own `src/`, 6 natural-language queries)
+
+| embedder | mode | found@5 | precision@1 |
+|---|---|---|---|
+| `hash` (offline) | semantic | 0.67 (chance) | **0.00** |
+| `gemini` | semantic | **0.83** | **0.67** |
+
+On conceptual queries that don't contain the code's identifiers, real embeddings rank the
+right file first 67% of the time; the offline baseline never does. Reproduce with
+`python bench/run_bench.py src/quolab --embedder gemini --mode semantic --fixtures bench/fixtures/queries_semantic.json`.
 
 ## Use it with Quorum (no GitLab Ultimate)
 

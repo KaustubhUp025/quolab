@@ -1,0 +1,8 @@
+[
+  {"query": "how are lexical and vector search results combined into one ranking", "expect": "retrieval.py"},
+  {"query": "call the embedding API to turn text into vectors", "expect": "embedder.py"},
+  {"query": "full-text keyword ranking of code snippets", "expect": "store.py"},
+  {"query": "download a repository before indexing it", "expect": "indexer.py"},
+  {"query": "decide whether a merge request should be blocked", "expect": "policy.py"},
+  {"query": "only re-process files that changed since the last run", "expect": "engine.py"}
+]

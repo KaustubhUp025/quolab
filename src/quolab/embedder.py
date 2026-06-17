@@ -24,10 +24,11 @@ _TASK_DOCUMENT = "RETRIEVAL_DOCUMENT"
 _TASK_QUERY = "RETRIEVAL_QUERY"
 
 # Retry transient embedding-API failures (rate limit / 5xx / network) with backoff.
+# max wait 65s so the free-tier "100 embed requests/minute" 429 (≈60s reset) self-heals.
 _embed_retry = retry(
     reraise=True,
-    stop=stop_after_attempt(4),
-    wait=wait_exponential(multiplier=1, min=2, max=30),
+    stop=stop_after_attempt(6),
+    wait=wait_exponential(multiplier=2, min=2, max=65),
 )
 
 

@@ -48,5 +48,6 @@ def test_bench_runs_on_self():
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
     import bench.run_bench as bench
 
-    rc = bench.run(".", k=5, threshold=0.0)   # threshold 0 -> exercise only, never fails
-    assert rc == 0
+    found_at_k, prec_at_1 = bench.run(".", k=5, embedder="hash")  # offline, lexical fixtures
+    assert found_at_k >= 0.8     # lexical retrieval on identifiers is strong & deterministic
+    assert 0.0 <= prec_at_1 <= 1.0
