@@ -34,11 +34,10 @@ class FakeEmbedder:
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     return Settings(
-        embedder="gemini",  # overridden by injected FakeEmbedder in engine tests
+        embedder="hash",  # overridden by injected FakeEmbedder in engine tests; no model load
         store="sqlite",
         sqlite_path=str(tmp_path / "index.db"),
         repo_cache=str(tmp_path / "repos"),
-        gemini_api_key="test-key-not-used",
     )
 
 

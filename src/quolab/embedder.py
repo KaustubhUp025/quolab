@@ -3,9 +3,12 @@
 The pipeline depends only on the :class:`Embedder` interface so the provider can be
 swapped by config (``QUOLAB_EMBEDDER``) without touching the indexer or store.
 
-Default: :class:`GeminiEmbedder` — the free hosted Gemini embedding API (no GPU).
-Stub:    :class:`LocalEmbedder` — a local OSS model (Qwen3-Embedding / nomic-embed-code)
-         via sentence-transformers, for full self-containment later.
+Default: :class:`LocalEmbedder` — a local OSS model (``Qwen/Qwen3-Embedding-0.6B``) via
+         sentence-transformers. Runs fully on-device (GPU if available, else CPU); no API
+         key, no rate limit, no per-request network round-trip.
+Opt-in:  :class:`GeminiEmbedder` — the hosted Gemini embedding API (needs a key and the
+         ``gemini`` extra). Subject to the free-tier 100 req/min cap.
+Offline: :class:`HashEmbedder` — deterministic, dependency-free; for CI/bench only.
 """
 
 from __future__ import annotations
@@ -80,25 +83,84 @@ class GeminiEmbedder:
 
 
 class LocalEmbedder:
-    """Local OSS embedding model via sentence-transformers (stub, opt-in extra)."""
+    """Local OSS embedding model via sentence-transformers — the default embedder.
 
-    def __init__(self, model: str, dim: int) -> None:
+    Runs on-device with no API key or rate limit. Uses the GPU when available — in fp16
+    to fit small VRAM — and **falls back to CPU automatically on CUDA out-of-memory** (a
+    real risk on a 4 GB laptop GPU shared with the display). Code-retrieval models such as
+    ``Qwen/Qwen3-Embedding-0.6B`` distinguish documents from queries via an instruction
+    prompt: documents are embedded plain, queries with the model's ``query`` prompt — the
+    local analogue of Gemini's ``RETRIEVAL_DOCUMENT`` / ``RETRIEVAL_QUERY`` task types.
+    """
+
+    # Code chunks are functions/classes — 1024 tokens is ample and caps activation memory.
+    _MAX_SEQ_LEN = 1024
+
+    def __init__(
+        self, model: str, dim: int, device: str = "auto", batch_size: int = 16
+    ) -> None:
         try:
+            import torch
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise RuntimeError(
                 "LocalEmbedder needs the 'local' extra: pip install 'quolab[local]'"
             ) from exc
-        self._model = SentenceTransformer(model)
-        self.dim = dim
+
+        self._torch = torch
+        self._batch_size = batch_size
+        resolved = (
+            "cuda" if (device == "auto" and torch.cuda.is_available())
+            else device if device in ("cuda", "cpu")
+            else "cpu"
+        )
+        self._model = SentenceTransformer(model, device=resolved)
+        self._device = resolved
+        if resolved == "cuda":
+            self._model.half()  # force fp16 (kwarg dtype names differ across transformers versions)
+        # Cap sequence length to bound activation memory (model defaults can be 32k).
+        if (self._model.max_seq_length or 0) > self._MAX_SEQ_LEN:
+            self._model.max_seq_length = self._MAX_SEQ_LEN
+        # Some code models define a "query" instruction prompt; use it when present.
+        self._query_prompt = "query" if "query" in getattr(self._model, "prompts", {}) else None
+
+        # method renamed get_sentence_embedding_dimension -> get_embedding_dimension in ST 5.x
+        get_dim = getattr(self._model, "get_embedding_dimension", None) or \
+            self._model.get_sentence_embedding_dimension
+        actual = get_dim()
+        if actual and actual != dim:
+            log.warning("embed_dim_mismatch", configured=dim, model_dim=actual, model=model,
+                        hint="set QUOLAB_EMBED_DIM to the model's native dim and reindex")
+        self.dim = actual or dim
+        log.info("local_embedder_ready", model=model, device=resolved, dim=self.dim,
+                 query_prompt=bool(self._query_prompt))
+
+    def _encode(self, texts: list[str], **kwargs) -> list[list[float]]:
+        """Encode with normalized vectors; retry on CPU if the GPU runs out of memory."""
+        try:
+            vecs = self._model.encode(
+                texts, normalize_embeddings=True, batch_size=self._batch_size, **kwargs
+            )
+        except self._torch.cuda.OutOfMemoryError:
+            if self._device != "cuda":
+                raise
+            log.warning("cuda_oom_fallback_cpu", note="moving local embedder to CPU for the rest of this run")
+            self._torch.cuda.empty_cache()
+            self._model = self._model.to("cpu").float()
+            self._device = "cpu"
+            vecs = self._model.encode(
+                texts, normalize_embeddings=True, batch_size=self._batch_size, **kwargs
+            )
+        return [v.tolist() for v in vecs]
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        return [v.tolist() for v in self._model.encode(texts, normalize_embeddings=True)]
+        return self._encode(texts)
 
     def embed_query(self, text: str) -> list[float]:
-        return self._model.encode([text], normalize_embeddings=True)[0].tolist()
+        kwargs = {"prompt_name": self._query_prompt} if self._query_prompt else {}
+        return self._encode([text], **kwargs)[0]
 
 
 class HashEmbedder:
@@ -135,7 +197,10 @@ def make_embedder(settings: Settings) -> Embedder:
         return GeminiEmbedder(settings.gemini_api_key, settings.embed_model, settings.embed_dim)
     if settings.embedder == "local":
         log.info("embedder_selected", backend="local", model=settings.embed_model)
-        return LocalEmbedder(settings.embed_model, settings.embed_dim)
+        return LocalEmbedder(
+            settings.embed_model, settings.embed_dim,
+            device=settings.embed_device, batch_size=settings.embed_batch_size,
+        )
     if settings.embedder == "hash":
         log.info("embedder_selected", backend="hash")
         return HashEmbedder(settings.embed_dim)

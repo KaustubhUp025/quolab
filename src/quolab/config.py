@@ -17,15 +17,28 @@ class Settings(BaseSettings):
     )
 
     # --- Embeddings ---
-    gemini_api_key: str = Field(default="", description="Gemini API key for the default embedder")
-    embedder: str = Field(default="gemini", description="Embedder backend: 'gemini' or 'local'")
-    embed_model: str = Field(
-        default="gemini-embedding-001",
-        description="Embedding model id (Gemini model, or sentence-transformers id when embedder=local)",
+    embedder: str = Field(
+        default="local", description="Embedder backend: 'local' (default), 'gemini' or 'hash'"
     )
-    embed_dim: int = Field(default=768, description="Embedding dimensionality")
+    embed_model: str = Field(
+        default="Qwen/Qwen3-Embedding-0.6B",
+        description="Embedding model id (sentence-transformers id when embedder=local, Gemini model id when embedder=gemini)",
+    )
+    embed_dim: int = Field(
+        default=1024, description="Embedding dimensionality (Qwen3-Embedding-0.6B native = 1024)"
+    )
     embed_concurrency: int = Field(
         default=4, ge=1, description="Parallel embedding batches during indexing"
+    )
+    embed_device: str = Field(
+        default="auto",
+        description="Device for the local embedder: 'auto' (GPU if it fits, else CPU), 'cuda' or 'cpu'",
+    )
+    embed_batch_size: int = Field(
+        default=16, ge=1, description="Encode batch size for the local embedder"
+    )
+    gemini_api_key: str = Field(
+        default="", description="Gemini API key (only used when embedder=gemini)"
     )
 
     # --- Vector store ---

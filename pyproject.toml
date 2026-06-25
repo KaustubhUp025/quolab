@@ -15,7 +15,6 @@ dependencies = [
     "pydantic-settings>=2.3",
     "httpx>=0.27",
     "structlog>=24.1",
-    "google-genai>=1.0",
     "numpy>=1.26",
     "PyYAML>=6.0",
     "tenacity>=8.2",
@@ -26,7 +25,11 @@ dependencies = [
 # back to line-window chunking when it is absent, so the package installs everywhere.
 treesitter = ["tree-sitter>=0.21,<0.22", "tree-sitter-languages>=1.10"]
 pg = ["psycopg[binary]>=3.1", "pgvector>=0.2"]
-local = ["sentence-transformers>=3.0"]
+# local = the DEFAULT embedder (Qwen3-Embedding-0.6B via sentence-transformers); no API
+# key, no rate limit. transformers>=4.51 is required for the Qwen3 architecture.
+local = ["sentence-transformers>=3.0", "transformers>=4.51"]
+# gemini = opt-in hosted embedder (the old default); only needed for QUOLAB_EMBEDDER=gemini.
+gemini = ["google-genai>=1.0"]
 mcp = ["mcp>=1.2"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5", "mypy>=1.10"]
 

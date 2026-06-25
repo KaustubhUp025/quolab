@@ -20,8 +20,9 @@ service that gives you the two GitLab Ultimate features that actually matter for
 automated code reviewer — without a paid tier:
 
 1. **Semantic code search** — AI-powered, cross-file code search built from scratch
-   (git clone → tree-sitter chunking → embeddings → vector search). A drop-in
-   replacement for GitLab Ultimate's *Advanced / GitLab Duo code search*.
+   (git clone → tree-sitter chunking → embeddings → vector search). Runs **fully
+   on-device by default (no API key, no rate limit)** via a local embedding model.
+   A drop-in replacement for GitLab Ultimate's *Advanced / GitLab Duo code search*.
 2. **A merge-gate policy engine** — consumes SARIF findings and gates merges via
    free-tier commit statuses. A lightweight stand-in for Ultimate's *Merge Request
    Approval / Scan-Result Policies*.
@@ -43,8 +44,8 @@ Quorum consumes it through a thin adapter; nothing here depends on Quorum.
 ## Quickstart
 
 ```bash
-pip install -e ".[dev,treesitter]"  # add ",pg" for Postgres, ",mcp" for the MCP shim
-cp .env.example .env             # set QUOLAB_GEMINI_API_KEY
+pip install -e ".[dev,treesitter,local]"  # add ",pg" for Postgres, ",mcp" for the MCP shim
+cp .env.example .env             # defaults to the local embedder — no API key needed
 uvicorn quolab.app:app --port 8080
 
 # index + search a public repo
@@ -58,7 +59,7 @@ curl -X POST localhost:8080/search -d '{"project_id":"https://gitlab.com/group/r
 repo (git clone / GitLab REST / local)
       │
       ▼
- tree-sitter chunking ─► embeddings (gemini | local | hash) ─► store (sqlite+FTS5 | pgvector)
+ tree-sitter chunking ─► embeddings (local | gemini | hash) ─► store (sqlite+FTS5 | pgvector)
                                                                    │
                             ┌──────────────── hybrid retrieval ────┘
                             │   lexical (BM25)  ⊕  vector  →  Reciprocal Rank Fusion
@@ -77,27 +78,32 @@ repo (git clone / GitLab REST / local)
 - **MCP:** `quolab mcp` → FastMCP streamable-HTTP `semantic_code_search` tool for agents
 
 ### Embeddings & store
-- **Embeddings:** `gemini` by default (free AI Studio key, no GPU; retry/backoff built in);
-  `local` (Qwen3-Embedding / nomic-embed-code) and `hash` (deterministic, offline for CI/dev).
+- **Embeddings:** `local` by default — `Qwen/Qwen3-Embedding-0.6B` via sentence-transformers,
+  on-device (auto GPU/fp16, CPU fallback), **no API key, no rate limit**. Also `gemini`
+  (opt-in hosted API; `pip install 'quolab[gemini]'`) and `hash` (deterministic, offline for CI/dev).
 - **Store:** SQLite (numpy cosine + FTS5) for zero-infra local; `pgvector` for production.
 - **Indexing:** incremental by commit SHA — only changed files are re-embedded.
 
-> **Free-tier note:** the AI Studio free tier caps `embed_content` at ~**100 requests/min**
-> (each chunk ≈ one request). quolab retries 429s with backoff, and incremental indexing
-> means you only pay that cost once per commit — but a *large first index* may need a
-> paid key or throttling (`QUOLAB_EMBED_CONCURRENCY=1`). The offline `hash` embedder needs
-> no key at all (lexical/hybrid still work; only pure-semantic quality drops).
+> **Local model note:** the default embedder downloads ~1.2 GB on first use (cached in
+> `~/.cache/huggingface`) and runs entirely on your machine — fp16 fits a 4 GB GPU, and it
+> falls back to CPU automatically. No key, no per-request network call, no rate limit.
+> The `hash` embedder needs no model at all (lexical/hybrid still work; only pure-semantic
+> quality drops). The hosted `gemini` path remains available but is subject to the AI Studio
+> free-tier cap of ~100 `embed_content` requests/min.
 
 ### Measured quality (dogfooding quolab on its own `src/`, 6 natural-language queries)
 
 | embedder | mode | found@5 | precision@1 |
 |---|---|---|---|
 | `hash` (offline) | semantic | 0.67 (chance) | **0.00** |
-| `gemini` | semantic | **0.83** | **0.67** |
+| `local` (Qwen3-0.6B, **default**) | semantic | **0.83** | **0.50** |
+| `gemini` (hosted) | semantic | **0.83** | **0.67** |
 
 On conceptual queries that don't contain the code's identifiers, real embeddings rank the
-right file first 67% of the time; the offline baseline never does. Reproduce with
-`python bench/run_bench.py src/quolab --embedder gemini --mode semantic --fixtures bench/fixtures/queries_semantic.json`.
+right file first far more often than the offline baseline. The default **local** Qwen3 model
+matches hosted Gemini on found@5 (0.83) with no API key or rate limit, at a small
+precision@1 cost. Reproduce the default (local) row with
+`python bench/run_bench.py src/quolab --embedder local --mode semantic --fixtures bench/fixtures/queries_semantic.json`.
 
 ## Use it with Quorum (no GitLab Ultimate)
 
