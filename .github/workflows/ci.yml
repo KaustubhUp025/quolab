@@ -31,7 +31,10 @@ jobs:
         run: pytest -q
 
   dogfood-benchmark:
-    # quolab proves its own retrieval quality on every PR (fully offline: hash embedder)
+    # quolab proves its own retrieval quality on every PR (fully offline: hash embedder).
+    # Gate is found@5; the run also reports NDCG@10 (the CoIR-standard ranking metric).
+    # The full leaderboard-comparable CoIR eval (bench/coir_eval.py) is manual/nightly —
+    # it needs network + a real model, so it is deliberately not in this fast gate.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +42,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[treesitter]"
-      - name: Retrieval benchmark (gate)
+      - name: Retrieval benchmark (gate + NDCG@10)
         env:
           QUOLAB_EMBEDDER: hash
           QUOLAB_BENCH_MIN: "0.8"
