@@ -72,6 +72,8 @@ def search(req: SearchRequest) -> SearchResponse:
         results = get_engine().search(
             req.project_id, req.query, req.ref, req.max_results, req.mode
         )
+    except ValueError as exc:  # bad input / not-indexed precondition
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         log.error("search_failed", error=str(exc))
         raise HTTPException(status_code=502, detail=f"search failed: {exc}") from exc
@@ -97,6 +99,8 @@ def status(project_id: str, ref: str = "HEAD") -> dict:
 def index(req: IndexRequest) -> dict:
     try:
         stats = get_engine().index(req.project_id, req.ref, force=req.force)
+    except ValueError as exc:  # bad input (e.g. disallowed host, control chars)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         log.error("index_failed", error=str(exc))
         raise HTTPException(status_code=502, detail=f"index failed: {exc}") from exc

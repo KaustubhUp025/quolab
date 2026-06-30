@@ -23,6 +23,38 @@ log = structlog.get_logger(__name__)
 _DEFAULT_REF = "HEAD"
 _EMBED_BATCH = 64
 
+# Input guards (S3). Bound sizes and reject control characters so a hostile caller can't
+# inject into git args / logs or force an oversized embed. Applied at the engine chokepoint
+# so HTTP, MCP and CLI all inherit them.
+_MAX_QUERY_CHARS = 2000
+_MAX_PROJECT_ID_CHARS = 512
+
+
+def _has_control_chars(s: str, *, allow_ws: bool) -> bool:
+    for ch in s:
+        o = ord(ch)
+        if o == 0x7F or (o < 0x20 and not (allow_ws and ch in "\t\n\r")):
+            return True
+    return False
+
+
+def _validate_project_id(project_id: str) -> None:
+    if not project_id or not project_id.strip():
+        raise ValueError("project_id must be a non-empty string")
+    if len(project_id) > _MAX_PROJECT_ID_CHARS:
+        raise ValueError(f"project_id too long (>{_MAX_PROJECT_ID_CHARS} chars)")
+    if _has_control_chars(project_id, allow_ws=False):
+        raise ValueError("project_id contains control characters")
+
+
+def _validate_query(query: str) -> None:
+    if not query or not query.strip():
+        raise ValueError("query must be a non-empty string")
+    if len(query) > _MAX_QUERY_CHARS:
+        raise ValueError(f"query too long (>{_MAX_QUERY_CHARS} chars)")
+    if _has_control_chars(query, allow_ws=True):
+        raise ValueError("query contains control characters")
+
 
 class SearchEngine:
     def __init__(
@@ -46,6 +78,7 @@ class SearchEngine:
         removed files are dropped. If the repo's HEAD commit is unchanged, returns
         immediately (0 embeds). ``force`` rebuilds from scratch.
         """
+        _validate_project_id(project_id)
         ref = ref or _DEFAULT_REF
         stats = IndexStats(project_id=project_id, ref=ref)
 
@@ -159,15 +192,25 @@ class SearchEngine:
         ``mode``: ``auto`` (default, picks per query), ``semantic``, ``lexical`` or
         ``hybrid`` (lexical+vector fused via RRF).
         """
+        _validate_project_id(project_id)
+        _validate_query(query)
         ref = ref or _DEFAULT_REF
         if mode not in retrieval.MODES:
             raise ValueError(f"Unknown mode {mode!r}; expected one of {sorted(retrieval.MODES)}")
+        # Clamp result count across every entrypoint (MCP has no per-request bound).
+        max_results = max(1, min(max_results, self.settings.max_results_cap))
         # Build on first use, and rebuild if the stored index was made by a different
         # embedder (its vectors are incompatible with the current query embedding).
-        if (
+        needs_index = (
             not self.store.has_index(project_id, ref)
             or self.store.get_embed_sig(project_id, ref) != self._embed_sig()
-        ):
+        )
+        if needs_index:
+            if not self.settings.allow_auto_index:
+                raise ValueError(
+                    f"{project_id!r}@{ref} is not indexed for the current embedder and "
+                    "auto-index is disabled; pre-warm it via /index first"
+                )
             self.index(project_id, ref)
         if mode == retrieval.AUTO:
             mode = retrieval.select_mode(query)

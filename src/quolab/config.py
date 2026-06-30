@@ -72,10 +72,19 @@ class Settings(BaseSettings):
         description="Comma-separated globs of files to index",
     )
 
-    # --- Server ---
+    # --- Server / limits ---
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8080)
     log_level: str = Field(default="info")
+    allow_auto_index: bool = Field(
+        default=True,
+        description="Let search build the index on first use. Set false on a read-only "
+        "deployment so search never triggers a clone (pre-warm explicitly via /index).",
+    )
+    max_results_cap: int = Field(
+        default=50, ge=1,
+        description="Hard cap on results per query across all entrypoints (DoS guard).",
+    )
 
     @property
     def include_glob_list(self) -> list[str]:
