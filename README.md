@@ -6,8 +6,9 @@
   <a href="https://github.com/KaustubhUp025/quolab/actions/workflows/ci.yml"><img src="https://github.com/KaustubhUp025/quolab/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/python-3.10%E2%80%933.12-blue" alt="python">
   <img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="license">
-  <img src="https://img.shields.io/badge/search-hybrid%20(BM25%2Bvector%2BRRF)-purple" alt="hybrid search">
+  <img src="https://img.shields.io/badge/search-hybrid%20(BM25%2Bvector%2BRRF%2Brerank)-purple" alt="hybrid search">
   <img src="https://img.shields.io/badge/MCP-FastMCP-purple" alt="mcp">
+  <img src="https://img.shields.io/badge/security-SSRF%20%2B%20injection%20hardened-red" alt="security">
 </p>
 
 # quolab
@@ -56,21 +57,36 @@ curl -X POST localhost:8080/search -d '{"project_id":"https://gitlab.com/group/r
 ## Architecture
 
 ```
-repo (git clone / GitLab REST / local)
+repo (git clone / GitLab REST / local)   ── fetch allow-list (SSRF guard)
       │
       ▼
- tree-sitter chunking ─► embeddings (local | gemini | hash) ─► store (sqlite+FTS5 | pgvector)
+ tree-sitter cAST chunking ─► embeddings (local | gemini | hash) ─► store (sqlite+FTS5 | pgvector)
                                                                    │
                             ┌──────────────── hybrid retrieval ────┘
-                            │   lexical (BM25)  ⊕  vector  →  Reciprocal Rank Fusion
+                            │   lexical (BM25)  ⊕  vector  →  RRF  →  (opt-in) cross-encoder rerank
                             ▼
               REST  /search    ·    MCP  semantic_code_search    ·    CLI  quolab search
+                            │
+                            └─► injection-safe, untrusted-data-fenced output
 ```
 
 ### Search modes (`mode=`)
 - **`auto`** (default) — picks per query: code-shaped queries → `hybrid`, natural language → `semantic`.
 - **`hybrid`** — BM25 ⊕ vector fused with RRF (best recall for code; exact identifiers + intent).
 - **`semantic`** — vector only. **`lexical`** — BM25/FTS5 only.
+
+### Reranking (opt-in cross-encoder second stage)
+Set `QUOLAB_RERANK_ENABLED=true` to add the 2026-standard second stage — `BM25 ⊕ vector →
+RRF → cross-encoder rerank` — which re-scores the top candidates by jointly attending over
+the query and each snippet. Default model is the **Apache-2.0** `BAAI/bge-reranker-v2-m3`
+(reuses the `local` extra; off by default to keep installs light). Tune with
+`QUOLAB_RERANK_MODEL`, `QUOLAB_RERANK_TOP_K`, `QUOLAB_RERANK_DEVICE`.
+
+### Chunking (cAST)
+tree-sitter chunking follows [cAST](https://arxiv.org/abs/2506.15655): each definition is its
+own chunk (split into windows only when it exceeds `QUOLAB_CHUNK_MAX_CHARS` non-whitespace
+characters), and adjacent module-level statements are packed up to that budget — so imports
+and constants are indexed too, without losing per-symbol granularity.
 
 ### Three ways to run it
 - **CLI:** `quolab search <repo> "where is the lock acquired" --mode auto`
@@ -104,6 +120,39 @@ right file first far more often than the offline baseline. The default **local**
 matches hosted Gemini on found@5 (0.83) with no API key or rate limit, at a small
 precision@1 cost. Reproduce the default (local) row with
 `python bench/run_bench.py src/quolab --embedder local --mode semantic --fixtures bench/fixtures/queries_semantic.json`.
+
+The dogfood bench also reports **NDCG@10** (the CoIR-standard graded-ranking metric) and runs
+in CI. For a leaderboard-comparable number, run the full
+[CoIR](https://github.com/CoIR-team/coir) benchmark against quolab's own embedder:
+`pip install -e '.[local,bench]' && python bench/coir_eval.py --tasks codesearchnet`.
+
+## Security (built to index untrusted repos)
+
+quolab clones arbitrary repositories and feeds snippets to an LLM reviewer, so it is hardened
+as both an SSRF surface and a prompt-injection delivery channel:
+
+- **Fetch allow-list** — only clones from `QUOLAB_FETCH_ALLOW_HOSTS` (defaults to your
+  `QUOLAB_GITLAB_URL` host, fails closed); the read-only token is **never** attached to a
+  non-allow-listed host. Local-path indexing is gated by `QUOLAB_ALLOW_LOCAL_PATH` (off in the
+  bundled Cloud Run env).
+- **Injection-safe output** — `/search` frames every snippet as untrusted *data* with a guard
+  note and a CommonMark-safe dynamic fence, so indexed code can't break out of the fence or
+  smuggle instructions into a downstream agent.
+- **Input limits & least privilege** — size/control-character validation on inputs, a
+  result-count cap (`QUOLAB_MAX_RESULTS_CAP`), and `QUOLAB_ALLOW_AUTO_INDEX=false` for a
+  read-only search surface that never clones on `/search`.
+- **Reproducible index** — an index records the embedder/model/dim that built it and
+  auto-rebuilds on mismatch, so swapping models never returns silent garbage.
+- **Reproducible container** — digest-pinned base image + hash-pinned `requirements-lock.txt`
+  (`pip install --require-hashes`).
+
+## Merge gate & findings dashboard
+
+- **`POST /gate`** — evaluate a SARIF report against a YAML/JSON policy (`block_on`, `warn_on`,
+  `max_findings`); returns the gate decision and records it. Also available offline via
+  `python -m quolab.policy_cli` and as a free-tier GitLab commit-status poster.
+- **`GET /dashboard`** — a dependency-free page aggregating recorded gate decisions across
+  projects over time (a minimal stand-in for Ultimate's *Security Dashboard*).
 
 ## Use it with Quorum (no GitLab Ultimate)
 
