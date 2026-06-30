@@ -41,6 +41,25 @@ class Settings(BaseSettings):
         default="", description="Gemini API key (only used when embedder=gemini)"
     )
 
+    # --- Reranking (opt-in cross-encoder second stage) ---
+    rerank_enabled: bool = Field(
+        default=False,
+        description="Rerank fused candidates with a cross-encoder (accuracy up, latency up). "
+        "Needs the 'local' extra; downloads the reranker model on first use.",
+    )
+    rerank_model: str = Field(
+        default="BAAI/bge-reranker-v2-m3",
+        description="Cross-encoder reranker id (sentence-transformers CrossEncoder). "
+        "Default is Apache-2.0 — avoid CC-BY-NC rerankers for an OSS deployment.",
+    )
+    rerank_device: str = Field(
+        default="auto", description="Device for the reranker: 'auto' | 'cuda' | 'cpu'"
+    )
+    rerank_top_k: int = Field(
+        default=20, ge=1,
+        description="How many top candidates to rerank; the reranked best max_results win.",
+    )
+
     # --- Vector store ---
     store: str = Field(default="sqlite", description="Vector store backend: 'sqlite' or 'pgvector'")
     sqlite_path: str = Field(default=".quolab_cache/index.db", description="SQLite index path")

@@ -12,7 +12,7 @@ import hashlib
 import structlog
 
 from quolab.config import Settings, get_settings
-from quolab.embedder import Embedder, make_embedder
+from quolab.embedder import Embedder, Reranker, make_embedder, make_reranker
 from quolab.indexer import chunk_text, fetch_repo, iter_source_files, resolve_commit
 from quolab.models import IndexStats, SearchResult
 from quolab import retrieval
@@ -62,10 +62,13 @@ class SearchEngine:
         settings: Settings | None = None,
         embedder: Embedder | None = None,
         store: VectorStore | None = None,
+        reranker: Reranker | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.embedder = embedder or make_embedder(self.settings)
         self.store = store or make_store(self.settings)
+        # None when reranking is disabled (default); rerank() then no-ops.
+        self.reranker = reranker if reranker is not None else make_reranker(self.settings)
 
     def _embed_sig(self) -> str:
         """Identity of the embedder that an index must match to be queryable (R1)."""
@@ -215,8 +218,11 @@ class SearchEngine:
         if mode == retrieval.AUTO:
             mode = retrieval.select_mode(query)
 
-        # over-fetch each arm so fusion has material to work with
+        # Over-fetch each arm so fusion (and, when enabled, reranking) has material to work
+        # with: at least rerank_top_k candidates when a reranker is present.
         arm_k = max_results if mode != retrieval.HYBRID else max(max_results * 3, 10)
+        if self.reranker is not None:
+            arm_k = max(arm_k, self.settings.rerank_top_k)
 
         vector_hits: list[SearchResult] = []
         lexical_hits: list[SearchResult] = []
@@ -227,13 +233,17 @@ class SearchEngine:
             lexical_hits = self.store.lexical_search(project_id, ref, query, arm_k)
 
         if mode == retrieval.SEMANTIC:
-            return vector_hits[:max_results]
-        if mode == retrieval.LEXICAL:
-            return lexical_hits[:max_results]
-        fused = retrieval.reciprocal_rank_fusion([vector_hits, lexical_hits])
-        log.info("hybrid_search", query=query, vector=len(vector_hits),
-                 lexical=len(lexical_hits), fused=len(fused))
-        return fused[:max_results]
+            candidates = vector_hits
+        elif mode == retrieval.LEXICAL:
+            candidates = lexical_hits
+        else:
+            candidates = retrieval.reciprocal_rank_fusion([vector_hits, lexical_hits])
+            log.info("hybrid_search", query=query, vector=len(vector_hits),
+                     lexical=len(lexical_hits), fused=len(candidates))
+
+        # Cross-encoder second stage (no-op when reranking is disabled).
+        candidates = retrieval.rerank(self.reranker, query, candidates, self.settings.rerank_top_k)
+        return candidates[:max_results]
 
 
 # Repository content is attacker-controllable (a repo can plant prompt-injection text in
