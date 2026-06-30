@@ -35,6 +35,10 @@ class SearchEngine:
         self.embedder = embedder or make_embedder(self.settings)
         self.store = store or make_store(self.settings)
 
+    def _embed_sig(self) -> str:
+        """Identity of the embedder that an index must match to be queryable (R1)."""
+        return f"{self.settings.embedder}:{self.settings.embed_model}:{self.embedder.dim}"
+
     def index(self, project_id: str, ref: str = _DEFAULT_REF, *, force: bool = False) -> IndexStats:
         """Fetch, chunk, embed and store a project — **incrementally**.
 
@@ -48,12 +52,22 @@ class SearchEngine:
         root = fetch_repo(self.settings, project_id, ref)
         commit = resolve_commit(root)
 
-        if force:
+        # An index is only valid for the embedder/model/dim that built it — a different
+        # embedder yields incompatible vectors (silent garbage or a shape error). If the
+        # stored signature differs (or a legacy index has none), rebuild from scratch.
+        sig = self._embed_sig()
+        indexed = self.store.has_index(project_id, ref)
+        sig_mismatch = indexed and self.store.get_embed_sig(project_id, ref) != sig
+
+        if force or sig_mismatch:
+            if sig_mismatch:
+                log.info("embed_signature_changed_reindex", project_id=project_id, ref=ref,
+                         stored=self.store.get_embed_sig(project_id, ref), current=sig)
             self.store.clear(project_id, ref)
         elif (
             commit
             and self.store.get_commit(project_id, ref) == commit
-            and self.store.has_index(project_id, ref)
+            and indexed
         ):
             log.info("index_unchanged", project_id=project_id, ref=ref, commit=commit[:12])
             return stats
@@ -91,6 +105,7 @@ class SearchEngine:
             self.store.set_file_shas(project_id, ref, current_sha)
         if commit:
             self.store.set_commit(project_id, ref, commit)
+        self.store.set_embed_sig(project_id, ref, sig)
 
         log.info("index_complete", project_id=project_id, ref=ref, commit=commit[:12],
                  files=stats.files, changed=len(changed), removed=len(removed),
@@ -147,7 +162,12 @@ class SearchEngine:
         ref = ref or _DEFAULT_REF
         if mode not in retrieval.MODES:
             raise ValueError(f"Unknown mode {mode!r}; expected one of {sorted(retrieval.MODES)}")
-        if not self.store.has_index(project_id, ref):
+        # Build on first use, and rebuild if the stored index was made by a different
+        # embedder (its vectors are incompatible with the current query embedding).
+        if (
+            not self.store.has_index(project_id, ref)
+            or self.store.get_embed_sig(project_id, ref) != self._embed_sig()
+        ):
             self.index(project_id, ref)
         if mode == retrieval.AUTO:
             mode = retrieval.select_mode(query)

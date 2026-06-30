@@ -75,6 +75,8 @@ class VectorStore(Protocol):
     def forget_files(self, project_id: str, ref: str, paths: list[str]) -> None: ...
     def get_commit(self, project_id: str, ref: str) -> str | None: ...
     def set_commit(self, project_id: str, ref: str, commit_sha: str) -> None: ...
+    def get_embed_sig(self, project_id: str, ref: str) -> str | None: ...
+    def set_embed_sig(self, project_id: str, ref: str, sig: str) -> None: ...
     def counts(self, project_id: str, ref: str) -> tuple[int, int]: ...
 
 
@@ -111,9 +113,14 @@ class SqliteVecStore:
         )
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS index_meta ("
-            "project_id TEXT, ref TEXT, commit_sha TEXT, "
+            "project_id TEXT, ref TEXT, commit_sha TEXT, embed_sig TEXT, "
             "PRIMARY KEY(project_id, ref))"
         )
+        # Migrate pre-existing DBs that predate the embed_sig column (R1).
+        try:
+            self._conn.execute("ALTER TABLE index_meta ADD COLUMN embed_sig TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already present
         self._has_fts = self._init_fts()
         self._conn.commit()
 
@@ -194,9 +201,26 @@ class SqliteVecStore:
         return row[0] if row else None
 
     def set_commit(self, project_id: str, ref: str, commit_sha: str) -> None:
+        # Upsert only commit_sha so a concurrent embed_sig write isn't clobbered.
         self._conn.execute(
-            "INSERT OR REPLACE INTO index_meta(project_id, ref, commit_sha) VALUES (?,?,?)",
+            "INSERT INTO index_meta(project_id, ref, commit_sha) VALUES (?,?,?) "
+            "ON CONFLICT(project_id, ref) DO UPDATE SET commit_sha=excluded.commit_sha",
             (project_id, ref, commit_sha),
+        )
+        self._conn.commit()
+
+    def get_embed_sig(self, project_id: str, ref: str) -> str | None:
+        cur = self._conn.execute(
+            "SELECT embed_sig FROM index_meta WHERE project_id=? AND ref=?", (project_id, ref)
+        )
+        row = cur.fetchone()
+        return row[0] if row and row[0] else None
+
+    def set_embed_sig(self, project_id: str, ref: str, sig: str) -> None:
+        self._conn.execute(
+            "INSERT INTO index_meta(project_id, ref, embed_sig) VALUES (?,?,?) "
+            "ON CONFLICT(project_id, ref) DO UPDATE SET embed_sig=excluded.embed_sig",
+            (project_id, ref, sig),
         )
         self._conn.commit()
 
@@ -323,8 +347,9 @@ class PgVectorStore:
         )
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS index_meta (project_id TEXT, ref TEXT, commit_sha TEXT, "
-            "PRIMARY KEY(project_id, ref))"
+            "embed_sig TEXT, PRIMARY KEY(project_id, ref))"
         )
+        self._conn.execute("ALTER TABLE index_meta ADD COLUMN IF NOT EXISTS embed_sig TEXT")
 
     def has_index(self, project_id: str, ref: str) -> bool:
         cur = self._conn.execute(
@@ -377,6 +402,19 @@ class PgVectorStore:
             "INSERT INTO index_meta(project_id, ref, commit_sha) VALUES (%s,%s,%s) "
             "ON CONFLICT (project_id, ref) DO UPDATE SET commit_sha=EXCLUDED.commit_sha",
             (project_id, ref, commit_sha),
+        )
+
+    def get_embed_sig(self, project_id: str, ref: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT embed_sig FROM index_meta WHERE project_id=%s AND ref=%s", (project_id, ref)
+        ).fetchone()
+        return row[0] if row and row[0] else None
+
+    def set_embed_sig(self, project_id: str, ref: str, sig: str) -> None:
+        self._conn.execute(
+            "INSERT INTO index_meta(project_id, ref, embed_sig) VALUES (%s,%s,%s) "
+            "ON CONFLICT (project_id, ref) DO UPDATE SET embed_sig=EXCLUDED.embed_sig",
+            (project_id, ref, sig),
         )
 
     def counts(self, project_id: str, ref: str) -> tuple[int, int]:
