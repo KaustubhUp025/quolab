@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     # --- Indexing ---
     max_file_bytes: int = Field(default=400_000, description="Skip files larger than this")
     chunk_max_lines: int = Field(default=120, description="Line-window size when no grammar")
+    chunk_max_chars: int = Field(
+        default=1500,
+        description="cAST chunk budget in non-whitespace characters: a definition larger "
+        "than this is split; small adjacent non-definition statements are packed up to it.",
+    )
     include_globs: str = Field(
         default="**/*.py,**/*.go,**/*.java,**/*.ts,**/*.js,**/*.rb,**/*.rs,**/*.cs,**/*.kt",
         description="Comma-separated globs of files to index",

@@ -219,7 +219,9 @@ def chunk_text(
 
     if parser is not None:
         try:
-            chunks = _chunk_with_treesitter(project_id, ref, path, text, parser)
+            chunks = _chunk_with_treesitter(
+                project_id, ref, path, text, parser, settings.chunk_max_chars
+            )
             if chunks:
                 return chunks
         except Exception as exc:  # pragma: no cover - defensive
@@ -228,35 +230,98 @@ def chunk_text(
     return _chunk_by_lines(project_id, ref, path, lines, settings.chunk_max_lines)
 
 
-def _chunk_with_treesitter(project_id, ref, path, text, parser) -> list[Chunk]:
-    tree = parser.parse(text.encode("utf-8"))
+def _nonws_len(s: str) -> int:
+    """Non-whitespace character count — the cAST size budget (text-dense, language-invariant)."""
+    return sum(1 for ch in s if not ch.isspace())
+
+
+def _node_name(node, data: bytes) -> str:
+    for child in node.children:
+        if child.type in ("identifier", "name", "field_identifier", "type_identifier"):
+            return data[child.start_byte:child.end_byte].decode("utf-8", "replace")
+    return ""
+
+
+def _line_at(data: bytes, byte_offset: int) -> int:
+    """1-based line number of a byte offset (count newlines before it)."""
+    return data.count(b"\n", 0, byte_offset) + 1
+
+
+def _chunk_with_treesitter(project_id, ref, path, text, parser, budget) -> list[Chunk]:
+    """cAST-style split-then-merge chunking, budgeted by non-whitespace characters.
+
+    Each top-level definition is its own chunk (its name preserved), split into line
+    windows if it exceeds the budget. Runs of adjacent *non-definition* statements
+    (imports, constants, module-level code — previously dropped) are packed together up to
+    the budget. This keeps per-symbol granularity while covering the whole file densely.
+    """
     data = text.encode("utf-8")
+    tree = parser.parse(data)
+
+    # 1) units = non-blank top-level nodes, tagged as definition or not.
+    units = []  # (start_byte, end_byte, symbol, is_def)
+    for node in tree.root_node.children:
+        snippet = data[node.start_byte:node.end_byte].decode("utf-8", "replace")
+        if not snippet.strip():
+            continue
+        is_def = node.type in _DEF_NODES
+        units.append((node.start_byte, node.end_byte,
+                      _node_name(node, data) if is_def else "", is_def))
+    if not units:
+        return []
+
+    # 2) merge: defs stand alone; greedily pack consecutive non-defs up to the budget.
+    spans = []  # (start_byte, end_byte, symbol)
+    i = 0
+    while i < len(units):
+        s, e, sym, is_def = units[i]
+        if is_def:
+            spans.append((s, e, sym))
+            i += 1
+            continue
+        j = i + 1
+        while j < len(units) and not units[j][3] and \
+                _nonws_len(data[s:units[j][1]].decode("utf-8", "replace")) <= budget:
+            e = units[j][1]
+            j += 1
+        spans.append((s, e, ""))
+        i = j
+
+    # 3) build chunks; split any span that still exceeds the budget into line windows.
     chunks: list[Chunk] = []
-
-    def node_name(node) -> str:
-        for child in node.children:
-            if child.type in ("identifier", "name", "field_identifier", "type_identifier"):
-                return data[child.start_byte:child.end_byte].decode("utf-8", "replace")
-        return ""
-
-    def visit(node) -> None:
-        if node.type in _DEF_NODES:
-            snippet = data[node.start_byte:node.end_byte].decode("utf-8", "replace")
-            chunks.append(
-                Chunk(
-                    project_id=project_id, ref=ref, path=path,
-                    start_line=node.start_point[0] + 1,
-                    end_line=node.end_point[0] + 1,
-                    symbol=node_name(node),
-                    text=snippet,
-                )
-            )
-            return  # don't descend into nested defs; the parent chunk covers them
-        for child in node.children:
-            visit(child)
-
-    visit(tree.root_node)
+    for s, e, sym in spans:
+        snippet = data[s:e].decode("utf-8", "replace")
+        if _nonws_len(snippet) <= budget:
+            chunks.append(Chunk(
+                project_id=project_id, ref=ref, path=path,
+                start_line=_line_at(data, s), end_line=_line_at(data, max(s, e - 1)),
+                symbol=sym, text=snippet,
+            ))
+        else:
+            _split_oversized(chunks, project_id, ref, path, _line_at(data, s), snippet, sym, budget)
     return chunks
+
+
+def _split_oversized(chunks, project_id, ref, path, base_line, snippet, symbol, budget):
+    """Split an over-budget span into line windows, keeping the symbol on the first piece."""
+    lines = snippet.split("\n")
+    buf: list[str] = []
+    buf_start = 0
+    for idx, ln in enumerate(lines):
+        buf.append(ln)
+        if _nonws_len("\n".join(buf)) >= budget:
+            chunks.append(Chunk(
+                project_id=project_id, ref=ref, path=path,
+                start_line=base_line + buf_start, end_line=base_line + idx,
+                symbol=symbol if buf_start == 0 else "", text="\n".join(buf),
+            ))
+            buf, buf_start = [], idx + 1
+    if any(line.strip() for line in buf):
+        chunks.append(Chunk(
+            project_id=project_id, ref=ref, path=path,
+            start_line=base_line + buf_start, end_line=base_line + len(lines) - 1,
+            symbol=symbol if buf_start == 0 else "", text="\n".join(buf),
+        ))
 
 
 def _chunk_by_lines(project_id, ref, path, lines, window) -> list[Chunk]:
