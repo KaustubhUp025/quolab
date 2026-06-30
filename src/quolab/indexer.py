@@ -46,8 +46,13 @@ def fetch_repo(settings: Settings, project_id: str, ref: str) -> Path:
     ``project_id`` may be a full clone URL or a ``group/repo`` path.
     """
     # Local-path passthrough: index a directory already on disk (CI/dogfood/dev).
+    # Gated so a deployed/multi-tenant service can't be coerced into reading local files.
     local = Path(project_id)
     if local.is_dir():
+        if not settings.allow_local_path:
+            raise ValueError(
+                "Refusing to index local path (set QUOLAB_ALLOW_LOCAL_PATH=true to allow)"
+            )
         return local
 
     cache = Path(settings.repo_cache) / _repo_key(project_id, ref)
@@ -127,12 +132,35 @@ def _fetch_via_rest(settings: Settings, project_id: str, ref: str, cache: Path) 
     log.info("rest_fetch_complete", project_id=project_id, ref=ref, files=len(blobs))
 
 
+def _remote_host(url: str) -> str | None:
+    """Extract the host from a clone URL: https/http or scp-like ``git@host:path``."""
+    if url.startswith(("http://", "https://")):
+        from urllib.parse import urlsplit
+
+        return (urlsplit(url).hostname or "").lower() or None
+    if url.startswith("git@"):
+        host = url[len("git@"):].split(":", 1)[0]
+        return host.lower() or None
+    return None
+
+
 def _clone_url(settings: Settings, project_id: str) -> str:
     if project_id.startswith(("http://", "https://", "git@")):
         url = project_id
     else:
         url = f"{settings.gitlab_url.rstrip('/')}/{project_id}.git"
-    # Inject a read-only token for private repos (https only).
+
+    # SSRF / token-exfiltration guard: only fetch from allow-listed hosts. Fails closed —
+    # an unknown host raises before we ever clone or attach a credential.
+    allow = settings.fetch_allow_host_list
+    host = _remote_host(url)
+    if "*" not in allow and (host is None or host not in allow):
+        raise ValueError(
+            f"Refusing to fetch from host {host!r}: not in the allowlist "
+            f"{allow or '(empty — set QUOLAB_FETCH_ALLOW_HOSTS)'}"
+        )
+
+    # Inject a read-only token only for an allow-listed https host (never leaks elsewhere).
     if settings.gitlab_token and url.startswith("https://"):
         url = url.replace("https://", f"https://oauth2:{settings.gitlab_token}@", 1)
     return url

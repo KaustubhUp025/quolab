@@ -51,6 +51,18 @@ class Settings(BaseSettings):
     gitlab_url: str = Field(default="https://gitlab.com", description="GitLab base URL")
     gitlab_token: str = Field(default="", description="GitLab read-only PAT (for fetch=rest)")
     repo_cache: str = Field(default=".repos", description="Where shallow clones are stored")
+    fetch_allow_hosts: str = Field(
+        default="",
+        description="Comma-separated host allowlist for remote fetch (clone/REST). "
+        "Empty = derive from QUOLAB_GITLAB_URL's host. Use '*' to allow any host. "
+        "Blocks SSRF / token exfiltration to arbitrary hosts.",
+    )
+    allow_local_path: bool = Field(
+        default=True,
+        description="Allow indexing a local on-disk directory passed as project_id "
+        "(needed for CLI/dev/bench). Set false in any deployed or multi-tenant "
+        "service to prevent arbitrary local-file reads.",
+    )
 
     # --- Indexing ---
     max_file_bytes: int = Field(default=400_000, description="Skip files larger than this")
@@ -68,6 +80,16 @@ class Settings(BaseSettings):
     @property
     def include_glob_list(self) -> list[str]:
         return [g.strip() for g in self.include_globs.split(",") if g.strip()]
+
+    @property
+    def fetch_allow_host_list(self) -> list[str]:
+        """Hosts quolab may fetch from. Defaults to the QUOLAB_GITLAB_URL host."""
+        if self.fetch_allow_hosts.strip():
+            return [h.strip().lower() for h in self.fetch_allow_hosts.split(",") if h.strip()]
+        from urllib.parse import urlsplit
+
+        host = urlsplit(self.gitlab_url).hostname
+        return [host.lower()] if host else []
 
 
 _settings: Settings | None = None
