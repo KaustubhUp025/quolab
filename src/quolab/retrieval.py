@@ -9,8 +9,12 @@ query shape.
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from quolab.models import SearchResult
+
+if TYPE_CHECKING:
+    from quolab.embedder import Reranker
 
 # Retrieval modes.
 SEMANTIC = "semantic"
@@ -71,3 +75,23 @@ def reciprocal_rank_fusion(
         r = best[key]
         out.append(SearchResult(chunk=r.chunk, score=score))
     return out
+
+
+def rerank(
+    reranker: "Reranker | None", query: str, results: list[SearchResult], top_k: int
+) -> list[SearchResult]:
+    """Reorder the top ``top_k`` candidates by a cross-encoder's relevance scores.
+
+    Cross-encoding costs one model call per candidate, so only the head is rescored; the
+    tail keeps its first-stage order behind the reranked block. A ``None`` reranker (the
+    default) is a no-op, so callers can apply this unconditionally.
+    """
+    if reranker is None or len(results) < 2:
+        return results
+    head = results[:top_k]
+    scores = reranker.rerank(query, [r.chunk.text for r in head])
+    reranked = [
+        SearchResult(chunk=r.chunk, score=float(s))
+        for r, s in sorted(zip(head, scores, strict=True), key=lambda rs: rs[1], reverse=True)
+    ]
+    return reranked + results[top_k:]

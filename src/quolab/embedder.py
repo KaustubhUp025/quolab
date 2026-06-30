@@ -190,6 +190,77 @@ class HashEmbedder:
         return self._vec(text)
 
 
+class Reranker(Protocol):
+    """Scores (query, document) pairs; higher means more relevant."""
+
+    def rerank(self, query: str, docs: list[str]) -> list[float]:
+        ...
+
+
+class LocalReranker:
+    """Cross-encoder reranker via sentence-transformers ``CrossEncoder``.
+
+    Mirrors :class:`LocalEmbedder`'s device handling and CUDA-OOM→CPU fallback. A
+    cross-encoder jointly attends over the query and each candidate, so it ranks far more
+    precisely than the bi-encoder first stage — at the cost of one model call per candidate,
+    which is why only the top-k fused candidates are reranked (see ``retrieval.rerank``).
+    """
+
+    _MAX_SEQ_LEN = 512  # reranker context; 512 is standard for bge-reranker
+
+    def __init__(self, model: str, device: str = "auto", batch_size: int = 16) -> None:
+        try:
+            import torch
+            from sentence_transformers import CrossEncoder
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "LocalReranker needs the 'local' extra: pip install 'quolab[local]'"
+            ) from exc
+
+        self._torch = torch
+        self._batch_size = batch_size
+        resolved = (
+            "cuda" if (device == "auto" and torch.cuda.is_available())
+            else device if device in ("cuda", "cpu")
+            else "cpu"
+        )
+        self._model = CrossEncoder(model, device=resolved, max_length=self._MAX_SEQ_LEN)
+        self._device = resolved
+        if resolved == "cuda":
+            try:
+                self._model.model.half()  # fp16 to fit small VRAM (attr stable across ST 2-5.x)
+            except Exception:  # pragma: no cover - version-dependent
+                pass
+        log.info("local_reranker_ready", model=model, device=resolved)
+
+    def rerank(self, query: str, docs: list[str]) -> list[float]:
+        if not docs:
+            return []
+        pairs = [[query, d] for d in docs]
+        try:
+            scores = self._model.predict(pairs, batch_size=self._batch_size)
+        except self._torch.cuda.OutOfMemoryError:
+            if self._device != "cuda":
+                raise
+            log.warning("cuda_oom_fallback_cpu", note="moving reranker to CPU for the rest of this run")
+            self._torch.cuda.empty_cache()
+            self._model.model = self._model.model.to("cpu").float()
+            self._device = "cpu"
+            scores = self._model.predict(pairs, batch_size=self._batch_size)
+        return [float(s) for s in scores]
+
+
+def make_reranker(settings: Settings) -> Reranker | None:
+    """Build the reranker, or ``None`` when reranking is disabled (the default)."""
+    if not settings.rerank_enabled:
+        return None
+    log.info("reranker_selected", model=settings.rerank_model)
+    return LocalReranker(
+        settings.rerank_model, device=settings.rerank_device,
+        batch_size=settings.embed_batch_size,
+    )
+
+
 def make_embedder(settings: Settings) -> Embedder:
     """Build the configured embedder."""
     if settings.embedder == "gemini":

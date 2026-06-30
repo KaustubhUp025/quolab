@@ -56,6 +56,63 @@ class GateDecision:
         return self.state == "success"
 
 
+def record_decision(db_path: str, project_id: str, sha: str, decision: GateDecision) -> None:
+    """Persist a gate decision so the dashboard can aggregate findings over time.
+
+    Stored in the same SQLite file as the index (zero-infra). A small, append-only log —
+    no new service or schema-heavy store.
+    """
+    import json
+    import sqlite3
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS gate_decisions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, project_id TEXT, sha TEXT, "
+            "state TEXT, blocking INT, warnings INT, total INT, reasons TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO gate_decisions(ts, project_id, sha, state, blocking, warnings, total, reasons)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"), project_id, sha,
+             decision.state, decision.blocking, decision.warnings, decision.total,
+             json.dumps(decision.reasons)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def recent_decisions(db_path: str, limit: int = 100) -> list[dict]:
+    """Return the most recent gate decisions (newest first) for the dashboard."""
+    import json
+    import sqlite3
+    from pathlib import Path
+
+    if not Path(db_path).exists():
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT ts, project_id, sha, state, blocking, warnings, total, reasons "
+            "FROM gate_decisions ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        return []  # table not created yet (no decisions recorded)
+    finally:
+        conn.close()
+    return [
+        {"ts": r[0], "project_id": r[1], "sha": r[2], "state": r[3],
+         "blocking": r[4], "warnings": r[5], "total": r[6], "reasons": json.loads(r[7] or "[]")}
+        for r in rows
+    ]
+
+
 def _iter_levels(sarif: dict):
     """Yield the SARIF ``level`` for every result across all runs."""
     for run in sarif.get("runs", []):

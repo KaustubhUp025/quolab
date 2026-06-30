@@ -11,18 +11,25 @@ Endpoints
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 import structlog
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from quolab import __version__
 from quolab.config import get_settings
 from quolab.engine import SearchEngine, format_results
+from quolab.policy import Policy, evaluate, recent_decisions, record_decision
 
 log = structlog.get_logger(__name__)
 
 app = FastAPI(title="quolab", version=__version__, description="OSS semantic code search")
+
+_STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 
 @lru_cache(maxsize=1)
@@ -61,6 +68,13 @@ class IndexRequest(BaseModel):
     force: bool = False
 
 
+class GateRequest(BaseModel):
+    project_id: str
+    sha: str = ""
+    sarif: dict = Field(..., description="A SARIF report (the format Quorum emits)")
+    policy: dict | None = Field(default=None, description="Optional policy override")
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"status": "ok", "version": __version__}
@@ -72,6 +86,8 @@ def search(req: SearchRequest) -> SearchResponse:
         results = get_engine().search(
             req.project_id, req.query, req.ref, req.max_results, req.mode
         )
+    except ValueError as exc:  # bad input / not-indexed precondition
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         log.error("search_failed", error=str(exc))
         raise HTTPException(status_code=502, detail=f"search failed: {exc}") from exc
@@ -97,6 +113,8 @@ def status(project_id: str, ref: str = "HEAD") -> dict:
 def index(req: IndexRequest) -> dict:
     try:
         stats = get_engine().index(req.project_id, req.ref, force=req.force)
+    except ValueError as exc:  # bad input (e.g. disallowed host, control chars)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         log.error("index_failed", error=str(exc))
         raise HTTPException(status_code=502, detail=f"index failed: {exc}") from exc
@@ -104,6 +122,33 @@ def index(req: IndexRequest) -> dict:
         "project_id": stats.project_id, "ref": stats.ref,
         "files": stats.files, "chunks": stats.chunks, "skipped": stats.skipped,
     }
+
+
+@app.post("/gate")
+def gate(req: GateRequest) -> dict:
+    """Evaluate a SARIF report against the merge-gate policy and record the decision.
+
+    Powers the findings dashboard (replaces GitLab Ultimate's Security Dashboard /
+    Scan-Result Policies) — same SARIF, no paid tier.
+    """
+    policy = Policy(**req.policy) if req.policy else Policy()
+    decision = evaluate(req.sarif, policy)
+    record_decision(get_settings().sqlite_path, req.project_id, req.sha, decision)
+    return {
+        "state": decision.state, "passed": decision.passed, "blocking": decision.blocking,
+        "warnings": decision.warnings, "total": decision.total, "reasons": decision.reasons,
+    }
+
+
+@app.get("/dashboard/data")
+def dashboard_data(limit: int = 100) -> dict:
+    decisions = recent_decisions(get_settings().sqlite_path, limit=max(1, min(limit, 500)))
+    return {"decisions": decisions, "count": len(decisions)}
+
+
+@app.get("/dashboard")
+def dashboard() -> FileResponse:
+    return FileResponse(str(_STATIC_DIR / "dashboard.html"))
 
 
 def main() -> None:  # pragma: no cover - thin entrypoint

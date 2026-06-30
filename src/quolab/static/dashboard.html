@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>quolab — findings dashboard</title>
+  <link rel="icon" href="/static/favicon.svg" />
+  <style>
+    :root { --bg:#0f1117; --card:#171a23; --line:#272b36; --ok:#2ea043; --fail:#d1242f; --muted:#8b949e; --fg:#e6edf3; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; background:var(--bg); color:var(--fg); }
+    header { display:flex; align-items:center; gap:12px; padding:18px 24px; border-bottom:1px solid var(--line); }
+    header img { height:28px; }
+    header h1 { font-size:16px; margin:0; font-weight:600; }
+    header .sub { color:var(--muted); font-size:12px; }
+    main { padding:24px; max-width:1100px; margin:0 auto; }
+    .cards { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin-bottom:22px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+    .card .n { font-size:26px; font-weight:700; }
+    .card .l { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+    table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+    th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); font-size:13px; }
+    th { color:var(--muted); font-weight:600; background:#12151d; }
+    tr:last-child td { border-bottom:none; }
+    .pill { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px; font-weight:600; }
+    .pass { background:rgba(46,160,67,.15); color:var(--ok); }
+    .failed { background:rgba(209,36,47,.15); color:var(--fail); }
+    .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted); }
+    .empty { color:var(--muted); padding:40px; text-align:center; }
+    .reasons { color:var(--muted); font-size:12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="/static/logo.svg" alt="quolab" />
+    <div>
+      <h1>Findings Dashboard</h1>
+      <div class="sub">Merge-gate decisions aggregated from SARIF — an OSS stand-in for GitLab Ultimate's Security Dashboard.</div>
+    </div>
+  </header>
+  <main>
+    <div class="cards">
+      <div class="card"><div class="n" id="c-total">–</div><div class="l">Gate runs</div></div>
+      <div class="card"><div class="n" id="c-failed">–</div><div class="l">Failed gates</div></div>
+      <div class="card"><div class="n" id="c-blocking">–</div><div class="l">Blocking findings</div></div>
+      <div class="card"><div class="n" id="c-warnings">–</div><div class="l">Warnings</div></div>
+    </div>
+    <table>
+      <thead><tr><th>When (UTC)</th><th>Project</th><th>Commit</th><th>State</th><th>Block</th><th>Warn</th><th>Total</th><th>Reasons</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </main>
+  <script>
+    function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+    async function load(){
+      let data;
+      try { data = await (await fetch('/dashboard/data')).json(); }
+      catch(e){ document.getElementById('rows').innerHTML = '<tr><td colspan="8" class="empty">Failed to load.</td></tr>'; return; }
+      const ds = data.decisions || [];
+      document.getElementById('c-total').textContent = ds.length;
+      document.getElementById('c-failed').textContent = ds.filter(d => d.state === 'failed').length;
+      document.getElementById('c-blocking').textContent = ds.reduce((a,d) => a + (d.blocking||0), 0);
+      document.getElementById('c-warnings').textContent = ds.reduce((a,d) => a + (d.warnings||0), 0);
+      const rows = document.getElementById('rows');
+      if (!ds.length){ rows.innerHTML = '<tr><td colspan="8" class="empty">No gate decisions recorded yet. POST a SARIF report to <span class="mono">/gate</span>.</td></tr>'; return; }
+      rows.innerHTML = ds.map(d => {
+        const cls = d.state === 'success' ? 'pass' : 'failed';
+        const label = d.state === 'success' ? 'passed' : 'failed';
+        const sha = d.sha ? esc(d.sha).slice(0,8) : '—';
+        const reasons = (d.reasons && d.reasons.length) ? esc(d.reasons.join('; ')) : '';
+        return `<tr><td class="mono">${esc(d.ts||'')}</td><td>${esc(d.project_id||'')}</td>`
+          + `<td class="mono">${sha}</td><td><span class="pill ${cls}">${label}</span></td>`
+          + `<td>${d.blocking||0}</td><td>${d.warnings||0}</td><td>${d.total||0}</td>`
+          + `<td class="reasons">${reasons}</td></tr>`;
+      }).join('');
+    }
+    load();
+  </script>
+</body>
+</html>
