@@ -10,12 +10,13 @@ Endpoints
 
 from __future__ import annotations
 
+import secrets
 from functools import lru_cache
 from pathlib import Path
 
 import structlog
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -30,6 +31,20 @@ app = FastAPI(title="quolab", version=__version__, description="OSS semantic cod
 
 _STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+# App-layer auth (defence-in-depth on top of Cloud Run IAM). When QUOLAB_API_KEY is
+# set, every request except the liveness probe must present it as 'X-API-Key'. quolab
+# can clone private repos with its GitLab token, so this guards /index + /search from
+# any caller that reaches the container. Empty key = open (local/dev only).
+@app.middleware("http")
+async def _require_api_key(request: Request, call_next):
+    key = get_settings().api_key
+    if key and request.url.path != "/healthz":
+        presented = request.headers.get("x-api-key", "")
+        if not secrets.compare_digest(presented, key):
+            log.warning("api_key_rejected", path=request.url.path)
+            return JSONResponse({"detail": "unauthorized"}, status_code=401)
+    return await call_next(request)
 
 
 @lru_cache(maxsize=1)

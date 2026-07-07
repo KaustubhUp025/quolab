@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8080)
     log_level: str = Field(default="info")
+    api_key: str = Field(
+        default="",
+        description="Shared API key. When set, every request except /healthz must send "
+        "it as the 'X-API-Key' header (defence-in-depth on top of network/IAM auth). "
+        "Empty = no app-layer gate (dev/local only).",
+    )
     allow_auto_index: bool = Field(
         default=True,
         description="Let search build the index on first use. Set false on a read-only "

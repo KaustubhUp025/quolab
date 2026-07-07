@@ -10,14 +10,16 @@ WORKDIR /app
 COPY pyproject.toml README.md requirements-lock.txt ./
 COPY src ./src
 
-# Reproducible install: pinned, hash-verified transitive deps first (runtime + pg extra),
-# then the package itself without re-resolving dependencies.
+# Reproducible install: pinned, hash-verified transitive deps first, then the
+# package itself without re-resolving dependencies. [gemini] pulls the google-genai
+# client used by GeminiEmbedder (the Cloud Run default embedder); [treesitter]
+# enables cAST (function/class) chunking instead of the line-window fallback.
 RUN pip install --no-cache-dir --require-hashes -r requirements-lock.txt \
-    && pip install --no-cache-dir --no-deps ".[pg]"
+    && pip install --no-cache-dir --no-deps ".[gemini,treesitter]"
 
 ENV QUOLAB_HOST=0.0.0.0 \
     QUOLAB_PORT=8080 \
-    QUOLAB_STORE=pgvector
+    QUOLAB_STORE=sqlite
 
 EXPOSE 8080
 CMD ["python", "-m", "quolab.app"]
