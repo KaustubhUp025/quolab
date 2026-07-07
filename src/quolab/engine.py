@@ -8,6 +8,7 @@ quolab as a drop-in replacement for GitLab Ultimate's semantic search.
 from __future__ import annotations
 
 import hashlib
+import threading
 
 import structlog
 
@@ -69,6 +70,17 @@ class SearchEngine:
         self.store = store or make_store(self.settings)
         # None when reranking is disabled (default); rerank() then no-ops.
         self.reranker = reranker if reranker is not None else make_reranker(self.settings)
+        # Per-(project@ref) locks so concurrent auto-index builds don't each rebuild
+        # (a review fires several searches; without this each would clone+embed anew).
+        self._index_locks: dict[str, threading.Lock] = {}
+        self._index_locks_guard = threading.Lock()
+
+    def _index_lock(self, key: str) -> threading.Lock:
+        with self._index_locks_guard:
+            lock = self._index_locks.get(key)
+            if lock is None:
+                lock = self._index_locks[key] = threading.Lock()
+            return lock
 
     def _embed_sig(self) -> str:
         """Identity of the embedder that an index must match to be queryable (R1)."""
@@ -204,17 +216,23 @@ class SearchEngine:
         max_results = max(1, min(max_results, self.settings.max_results_cap))
         # Build on first use, and rebuild if the stored index was made by a different
         # embedder (its vectors are incompatible with the current query embedding).
-        needs_index = (
-            not self.store.has_index(project_id, ref)
-            or self.store.get_embed_sig(project_id, ref) != self._embed_sig()
-        )
-        if needs_index:
+        def _needs_index() -> bool:
+            return (
+                not self.store.has_index(project_id, ref)
+                or self.store.get_embed_sig(project_id, ref) != self._embed_sig()
+            )
+
+        if _needs_index():
             if not self.settings.allow_auto_index:
                 raise ValueError(
                     f"{project_id!r}@{ref} is not indexed for the current embedder and "
                     "auto-index is disabled; pre-warm it via /index first"
                 )
-            self.index(project_id, ref)
+            # Serialize builds per project/ref: concurrent searches wait for the first
+            # build instead of each starting their own, then re-check under the lock.
+            with self._index_lock(f"{project_id}@{ref}"):
+                if _needs_index():
+                    self.index(project_id, ref)
         if mode == retrieval.AUTO:
             mode = retrieval.select_mode(query)
 

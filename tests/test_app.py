@@ -27,6 +27,49 @@ def test_healthz():
     assert resp.json()["status"] == "ok"
 
 
+def test_concurrent_search_builds_index_once(tmp_path, monkeypatch):
+    # A review fires several searches at once; the per-project lock must let only the
+    # first build the index (the rest wait, then re-check) — not N concurrent rebuilds.
+    import threading
+    import time
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("def compensate():\n    rollback()\n")
+
+    builds = []
+
+    def counting_fetch(s, p, r):
+        builds.append(1)
+        time.sleep(0.4)  # hold long enough that the other searches reach the lock
+        return repo
+
+    monkeypatch.setattr("quolab.engine.fetch_repo", counting_fetch)
+    settings = Settings(
+        sqlite_path=str(tmp_path / "i.db"),
+        repo_cache=str(tmp_path / "r"),
+        allow_auto_index=True,
+    )
+    eng = SearchEngine(
+        settings=settings, embedder=FakeEmbedder(),
+        store=SqliteVecStore(settings.sqlite_path),
+    )
+
+    def run():
+        try:
+            eng.search("proj", "compensate")
+        except Exception:
+            pass  # only the build-count matters here
+
+    threads = [threading.Thread(target=run) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(builds) == 1  # exactly one clone/build despite 3 concurrent searches
+
+
 # --- API-key gate (defence-in-depth) ---
 
 def test_healthz_open_even_with_api_key(monkeypatch):
